@@ -38,7 +38,7 @@ class RankManager:
             json.dump(self.user_ranks, f)
             print("Saved ranks to 'ranks.json'")
 
-    def load_ranks(self, members):
+    async def load_ranks(self, members):
         """Load ranks from existing member nicknames."""
         print("Loading ranks from nicknames...")
         for member in members:
@@ -52,6 +52,7 @@ class RankManager:
             else:
                 print(f"No rank found in nickname for member {member.display_name}")
         self.save_ranks_to_file()
+        
 
     @staticmethod
     def parse_rank(nickname):
@@ -88,6 +89,22 @@ class RankManager:
     async def adjust_ranks(self, guild, target_member_id, old_rank, new_rank):
         """Adjust ranks of other members based on the new rank assignment."""
         print(f"Adjusting ranks in guild: {guild.name}")
+
+        # Check if new_rank is occupied
+        rank_is_occupied = any(
+            rank == new_rank and int(member_id_str) != target_member_id
+            for member_id_str, rank in self.user_ranks.items()
+        )
+
+        if not rank_is_occupied:
+            # No need to adjust other ranks
+            print(f"New rank {new_rank} is unoccupied. No need to adjust other ranks.")
+            self.save_ranks_to_file()
+            return
+
+        # If new_rank is occupied, adjust other ranks
+        print(f"New rank {new_rank} is occupied. Adjusting other ranks.")
+
         for member_id_str, rank in self.user_ranks.items():
             member_id = int(member_id_str)
             if member_id == target_member_id:
@@ -104,22 +121,58 @@ class RankManager:
             print(f"Processing member: {member.display_name}, Current Rank: {rank}")
 
             if old_rank is not None:
-                # If the rank is between old_rank and new_rank, adjust it
-                if old_rank < new_rank and old_rank < rank <= new_rank:
-                    self.user_ranks[str(member_id)] = rank - 1
-                    await self.update_nickname(member, rank - 1)
-                    print(f"Decreased rank of {member.display_name} to {rank - 1}")
-                elif new_rank <= rank < old_rank:
-                    self.user_ranks[str(member_id)] = rank + 1
-                    await self.update_nickname(member, rank + 1)
-                    print(f"Increased rank of {member.display_name} to {rank + 1}")
+                if old_rank < new_rank:
+                    # Moving down in rank numbers (e.g., from 5 to 10)
+                    if old_rank < rank <= new_rank:
+                        self.user_ranks[str(member_id)] = rank - 1
+                        await self.update_nickname(member, rank - 1)
+                        print(f"Decreased rank of {member.display_name} to {rank - 1}")
+                else:
+                    # Moving up in rank numbers (e.g., from 10 to 5)
+                    if new_rank <= rank < old_rank:
+                        self.user_ranks[str(member_id)] = rank + 1
+                        await self.update_nickname(member, rank + 1)
+                        print(f"Increased rank of {member.display_name} to {rank + 1}")
             else:
-                # No old rank, so shift ranks greater than or equal to new_rank
+                # No old rank
                 if rank >= new_rank:
                     self.user_ranks[str(member_id)] = rank + 1
                     await self.update_nickname(member, rank + 1)
                     print(f"Increased rank of {member.display_name} to {rank + 1}")
+
         self.save_ranks_to_file()
+        await self.fill_rank_gaps(guild)
+
+    async def fill_rank_gaps(self, guild):
+            """Reassign ranks to fill any gaps."""
+            print("Filling rank gaps...")
+            # Get all user IDs and their ranks
+            rank_items = list(self.user_ranks.items())
+            # Sort the items by rank
+            rank_items.sort(key=lambda x: x[1])
+            # Reassign ranks starting from 1
+            new_user_ranks = {}
+            for i, (user_id_str, _) in enumerate(rank_items, start=1):
+                new_user_ranks[user_id_str] = i
+
+            # Update nicknames if ranks have changed
+            for user_id_str, new_rank in new_user_ranks.items():
+                old_rank = self.user_ranks[user_id_str]
+                if old_rank != new_rank:
+                    member_id = int(user_id_str)
+                    try:
+                        member = guild.get_member(member_id)
+                        if member is None:
+                            member = await guild.fetch_member(member_id)
+                        self.user_ranks[user_id_str] = new_rank
+                        await self.update_nickname(member, new_rank)
+                        print(f"Adjusted rank of {member.display_name} from {old_rank} to {new_rank}")
+                    except discord.NotFound:
+                        print(f"Member with ID {member_id} not found.")
+                        continue
+
+            self.user_ranks = new_user_ranks
+            self.save_ranks_to_file()
 
 class RankCog(commands.Cog):
     """Cog for managing user ranks."""
