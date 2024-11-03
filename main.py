@@ -21,24 +21,32 @@ class RankManager:
     def __init__(self):
         # In-memory storage for user ranks: {user_id: rank}
         self.user_ranks = {}
+        # Store the rank list message ID
+        self.rank_message_id = None
         self.load_ranks_from_file()
 
     def load_ranks_from_file(self):
-        """Load ranks from a JSON file."""
+        """Load ranks and message ID from a JSON file."""
         if os.path.exists('ranks.json'):
             with open('ranks.json', 'r') as f:
-                self.user_ranks = json.load(f)
-                print("Loaded ranks from 'ranks.json'")
+                data = json.load(f)
+                self.user_ranks = data.get('user_ranks', {})
+                self.rank_message_id = data.get('rank_message_id')
+                print("Loaded ranks and rank message ID from 'ranks.json'")
         else:
             print("'ranks.json' not found. Starting with empty ranks.")
 
     def save_ranks_to_file(self):
-        """Save ranks to a JSON file."""
+        """Save ranks and message ID to a JSON file."""
+        data = {
+            'user_ranks': self.user_ranks,
+            'rank_message_id': self.rank_message_id
+        }
         with open('ranks.json', 'w') as f:
-            json.dump(self.user_ranks, f)
-            print("Saved ranks to 'ranks.json'")
+            json.dump(data, f, indent=4)
+            print("Saved ranks and rank message ID to 'ranks.json'")
 
-    async def load_ranks(self, members):
+    async def load_ranks(self, guild, members):
         """Load ranks from existing member nicknames."""
         print("Loading ranks from nicknames...")
         for member in members:
@@ -52,7 +60,6 @@ class RankManager:
             else:
                 print(f"No rank found in nickname for member {member.display_name}")
         self.save_ranks_to_file()
-        
 
     @staticmethod
     def parse_rank(nickname):
@@ -100,6 +107,7 @@ class RankManager:
             # No need to adjust other ranks
             print(f"New rank {new_rank} is unoccupied. No need to adjust other ranks.")
             self.save_ranks_to_file()
+            await self.update_rank_message(guild)  # Update the rank list message
             return
 
         # If new_rank is occupied, adjust other ranks
@@ -141,38 +149,95 @@ class RankManager:
                     print(f"Increased rank of {member.display_name} to {rank + 1}")
 
         self.save_ranks_to_file()
+        await self.update_rank_message(guild)  # Update the rank list message
         await self.fill_rank_gaps(guild)
 
     async def fill_rank_gaps(self, guild):
-            """Reassign ranks to fill any gaps."""
-            print("Filling rank gaps...")
-            # Get all user IDs and their ranks
-            rank_items = list(self.user_ranks.items())
-            # Sort the items by rank
-            rank_items.sort(key=lambda x: x[1])
-            # Reassign ranks starting from 1
-            new_user_ranks = {}
-            for i, (user_id_str, _) in enumerate(rank_items, start=1):
-                new_user_ranks[user_id_str] = i
+        """Reassign ranks to fill any gaps."""
+        print("Filling rank gaps...")
+        # Get all user IDs and their ranks
+        rank_items = list(self.user_ranks.items())
+        # Sort the items by rank
+        rank_items.sort(key=lambda x: x[1])
+        # Reassign ranks starting from 1
+        new_user_ranks = {}
+        for i, (user_id_str, _) in enumerate(rank_items, start=1):
+            new_user_ranks[user_id_str] = i
 
-            # Update nicknames if ranks have changed
-            for user_id_str, new_rank in new_user_ranks.items():
-                old_rank = self.user_ranks[user_id_str]
-                if old_rank != new_rank:
-                    member_id = int(user_id_str)
-                    try:
-                        member = guild.get_member(member_id)
-                        if member is None:
-                            member = await guild.fetch_member(member_id)
-                        self.user_ranks[user_id_str] = new_rank
-                        await self.update_nickname(member, new_rank)
-                        print(f"Adjusted rank of {member.display_name} from {old_rank} to {new_rank}")
-                    except discord.NotFound:
-                        print(f"Member with ID {member_id} not found.")
-                        continue
+        # Update nicknames if ranks have changed
+        for user_id_str, new_rank in new_user_ranks.items():
+            old_rank = self.user_ranks[user_id_str]
+            if old_rank != new_rank:
+                member_id = int(user_id_str)
+                try:
+                    member = guild.get_member(member_id)
+                    if member is None:
+                        member = await guild.fetch_member(member_id)
+                    self.user_ranks[user_id_str] = new_rank
+                    await self.update_nickname(member, new_rank)
+                    print(f"Adjusted rank of {member.display_name} from {old_rank} to {new_rank}")
+                except discord.NotFound:
+                    print(f"Member with ID {member_id} not found.")
+                    continue
 
-            self.user_ranks = new_user_ranks
-            self.save_ranks_to_file()
+        self.user_ranks = new_user_ranks
+        self.save_ranks_to_file()
+        await self.update_rank_message(guild)  # Update the rank list message
+
+    async def update_rank_message(self, guild):
+        """Create or update the rank list message in a designated channel."""
+        channel_name = "rank-list"  # Name of the channel to post the rank list
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+
+        if channel is None:
+            # Create the channel if it doesn't exist
+            try:
+                channel = await guild.create_text_channel(channel_name)
+                print(f"Created channel '{channel_name}' in guild '{guild.name}'")
+            except Exception as e:
+                print(f"Failed to create channel '{channel_name}': {e}")
+                return
+
+        # Generate the rank list content
+        if not self.user_ranks:
+            rank_list = "No ranks available."
+        else:
+            sorted_ranks = sorted(self.user_ranks.items(), key=lambda x: x[1])
+            rank_lines = []
+            for user_id, rank in sorted_ranks:
+                try:
+                    member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+                    nickname = member.nick if member.nick else member.name
+                    rank_lines.append(f"Rank {rank}: {nickname}")
+                except discord.NotFound:
+                    rank_lines.append(f"Rank {rank}: User with ID {user_id} not found in guild")
+
+            rank_list = "\n".join(rank_lines)
+
+        # If a message ID is stored, try to fetch and edit the message
+        if self.rank_message_id:
+            try:
+                message = await channel.fetch_message(self.rank_message_id)
+                await message.edit(content=f"```\n{rank_list}\n```")
+                print(f"Updated rank list message in channel '{channel_name}'")
+            except discord.NotFound:
+                # Message not found; send a new one
+                message = await channel.send(f"```\n{rank_list}\n```")
+                self.rank_message_id = message.id
+                self.save_ranks_to_file()
+                print(f"Sent new rank list message in channel '{channel_name}'")
+            except Exception as e:
+                print(f"Failed to update rank list message: {e}")
+        else:
+            # No message ID stored; send a new message
+            try:
+                message = await channel.send(f"```\n{rank_list}\n```")
+                self.rank_message_id = message.id
+                self.save_ranks_to_file()
+                print(f"Sent new rank list message in channel '{channel_name}'")
+            except Exception as e:
+                print(f"Failed to send rank list message: {e}")
+
 
 class RankCog(commands.Cog):
     """Cog for managing user ranks."""
@@ -192,7 +257,9 @@ class RankCog(commands.Cog):
             # Fetch all members
             members = [member async for member in guild.fetch_members(limit=None)]
             print(f"Fetched {len(members)} members from guild '{guild.name}'")
-            self.rank_manager.load_ranks(members)
+            await self.rank_manager.load_ranks(guild, members)
+            # Update the rank list message in the designated channel
+            await self.rank_manager.update_rank_message(guild)
         print("User ranks have been initialized.")
 
     @app_commands.command(name="rank", description="Change a user's rank and adjust other users' ranks accordingly.")
@@ -273,11 +340,13 @@ class RankCog(commands.Cog):
                         print(f"Detected rank change for {member.display_name}: {current_rank} -> {rank}")
                         self.rank_manager.user_ranks[str(member.id)] = rank
                         self.rank_manager.save_ranks_to_file()
+                        await self.rank_manager.update_rank_message(guild)  # Update the rank list message
                 else:
                     if str(member.id) in self.rank_manager.user_ranks:
                         print(f"Rank removed from nickname of {member.display_name}")
                         del self.rank_manager.user_ranks[str(member.id)]
                         self.rank_manager.save_ranks_to_file()
+                        await self.rank_manager.update_rank_message(guild)  # Update the rank list message
 
     @check_nicknames.before_loop
     async def before_check_nicknames(self):
