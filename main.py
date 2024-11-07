@@ -99,18 +99,25 @@ class RankManager:
 
     async def update_nickname(self, member, new_rank):
         """Update a member's nickname with the new rank or remove it."""
-        if member.nick is None:
-            name_without_rank = member.name
-        else:
+        # Extract the base nickname without rank
+        if member.nick is not None:
+            # If member has a nickname, remove the rank from it
             name_without_rank = re.sub(r'#\s*\d+$', '', member.nick).strip()
+        else:
+            # If member does not have a nickname, use their username
+            name_without_rank = member.name
         
+        # Decide the new nickname
         if new_rank is not None:
-            # Append the new rank to the nickname
             new_nickname = f"{name_without_rank} #{new_rank}"
         else:
-            # No rank to add, just use the name without rank
-            new_nickname = name_without_rank if name_without_rank != member.name else None  # Reset nickname to None if same as username
-        
+            # No new rank, just use the name without rank
+            new_nickname = name_without_rank
+
+        # If the new nickname is the same as the username, set nick to None to remove nickname
+        if new_nickname == member.name:
+            new_nickname = None
+
         try:
             await member.edit(nick=new_nickname)
             print(f"Updated nickname for {member.display_name} to '{new_nickname}'")
@@ -118,6 +125,7 @@ class RankManager:
             print(f"Permission denied to change nickname for {member.display_name}.")
         except Exception as e:
             print(f"An error occurred while changing nickname: {e}")
+
         self.save_ranks_to_file()
 
     async def adjust_ranks(self, guild, target_member_id, old_rank, new_rank):
@@ -337,9 +345,12 @@ class RankCog(commands.Cog):
             await self.rank_manager.update_rank_message(guild)
         print("User ranks have been initialized.")
 
-    @app_commands.command(name="rank", description="Change a user's rank and adjust other users' ranks accordingly.")
+    # Create a command group for 'rank'
+    rank = app_commands.Group(name="rank", description="Commands to manage user ranks.")
+
+    @rank.command(name="set", description="Change a user's rank and adjust other users' ranks accordingly.")
     @app_commands.describe(member='The member to change rank for', new_rank='The new rank to assign')
-    async def rank(self, interaction: discord.Interaction, member: discord.Member, new_rank: int):
+    async def rank_set(self, interaction: discord.Interaction, member: discord.Member, new_rank: int):
         """
         Change a user's rank and adjust other users' ranks accordingly.
         """
@@ -375,28 +386,89 @@ class RankCog(commands.Cog):
             await interaction.followup.send(f"✅ {member.mention}'s rank has been updated to {new_rank}.")
         except Exception as e:
             # Log the error and send an error message
-            print(f"An error occurred in rank command: {e}")
+            print(f"An error occurred in rank set command: {e}")
             if not interaction.is_expired():
                 await interaction.followup.send("🚫 An error occurred while processing the command.", ephemeral=True)
         finally:
             end_time = time.monotonic()
             elapsed_time = end_time - start_time
-            print(f"Rank command executed in {elapsed_time:.2f} seconds")
+            print(f"Rank set command executed in {elapsed_time:.2f} seconds")
 
-    @rank.error
-    async def rank_error(self, interaction: discord.Interaction, error):
-        """Handle errors for the rank command."""
+    @rank_set.error
+    async def rank_set_error(self, interaction: discord.Interaction, error):
+        """Handle errors for the rank set command."""
         if isinstance(error, app_commands.errors.MissingPermissions):
             if not interaction.response.is_done():
                 await interaction.response.send_message("🚫 You do not have permission to change ranks.", ephemeral=True)
         elif isinstance(error, app_commands.AppCommandError):
             if not interaction.response.is_done():
                 await interaction.response.send_message("🚫 Invalid arguments or an error occurred.", ephemeral=True)
-            print(f"Error in rank command: {error}")
+            print(f"Error in rank set command: {error}")
         else:
             if not interaction.response.is_done():
                 await interaction.response.send_message("🚫 An unexpected error occurred.", ephemeral=True)
-            print(f"Error in rank command: {error}")
+            print(f"Error in rank set command: {error}")
+
+    # New 'remove' subcommand
+    @rank.command(name="remove", description="Remove a user's rank and adjust other users' ranks accordingly.")
+    @app_commands.describe(member='The member to remove rank from')
+    async def rank_remove(self, interaction: discord.Interaction, member: discord.Member):
+        """
+        Remove a user's rank and adjust other users' ranks accordingly.
+        """
+        # Check if the user has Admin permission or "Mommy" role
+        if not (
+            interaction.user.guild_permissions.administrator or
+            discord.utils.get(interaction.user.roles, name="Mommy")
+        ):
+            await interaction.response.send_message(
+                "🚫 You do not have permission to use this command. Only admins or authorized roles can use this.",
+                ephemeral=True
+            )
+            return
+
+        # Defer the interaction immediately
+        await interaction.response.defer(thinking=True)
+
+        start_time = time.monotonic()  # Start timing the command execution
+
+        try:
+            old_rank = self.rank_manager.user_ranks.pop(str(member.id), None)
+            if old_rank is None:
+                await interaction.followup.send(f"🚫 {member.mention} does not have a rank assigned.", ephemeral=True)
+                return
+
+            # Update the member's nickname to remove the rank
+            await self.rank_manager.update_nickname(member, None)
+
+            # Adjust the ranks of other members to fill the gap
+            await self.rank_manager.fill_rank_gaps(interaction.guild)
+
+            await interaction.followup.send(f"✅ {member.mention}'s rank has been removed.")
+        except Exception as e:
+            # Log the error and send an error message
+            print(f"An error occurred in rank remove command: {e}")
+            if not interaction.is_expired():
+                await interaction.followup.send("🚫 An error occurred while processing the command.", ephemeral=True)
+        finally:
+            end_time = time.monotonic()
+            elapsed_time = end_time - start_time
+            print(f"Rank remove command executed in {elapsed_time:.2f} seconds")
+
+    @rank_remove.error
+    async def rank_remove_error(self, interaction: discord.Interaction, error):
+        """Handle errors for the rank remove command."""
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("🚫 You do not have permission to remove ranks.", ephemeral=True)
+        elif isinstance(error, app_commands.AppCommandError):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("🚫 Invalid arguments or an error occurred.", ephemeral=True)
+            print(f"Error in rank remove command: {error}")
+        else:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("🚫 An unexpected error occurred.", ephemeral=True)
+            print(f"Error in rank remove command: {error}")
 
     @tasks.loop(seconds=10)  # Adjusted to run every 3 minutes
     async def check_nicknames(self):
