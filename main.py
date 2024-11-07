@@ -122,62 +122,102 @@ class RankManager:
 
     async def adjust_ranks(self, guild, target_member_id, old_rank, new_rank):
         """Adjust ranks of other members based on the new rank assignment."""
+
         print(f"Adjusting ranks in guild: {guild.name}")
 
-        # Check if new_rank is occupied
+        # Determine the direction of rank movement
+        if old_rank is not None and old_rank < new_rank:
+            direction = 'down'
+        elif old_rank is not None and old_rank > new_rank:
+            direction = 'up'
+        else:
+            direction = None  # Either new assignment or same rank
+
+        # Check if new_rank is occupied (excluding the target member)
         rank_is_occupied = any(
             rank == new_rank and int(member_id_str) != target_member_id
             for member_id_str, rank in self.user_ranks.items()
         )
 
-        if not rank_is_occupied:
+        # If assigning to a new rank that is occupied, we need to shift
+        # If moving a member from an existing rank to a new one, we may also need to shift to fill the gap
+        needs_shift = rank_is_occupied or (old_rank is not None)
+
+        if not needs_shift:
             # No need to adjust other ranks
-            print(f"New rank {new_rank} is unoccupied. No need to adjust other ranks.")
+            print(f"New rank {new_rank} is unoccupied and no old rank to adjust. No need to adjust other ranks.")
+            self.user_ranks[str(target_member_id)] = new_rank
             self.save_ranks_to_file()
             await self.update_rank_message(guild)  # Update the rank list message
+            await self.update_nickname(guild.get_member(target_member_id), new_rank)
             return
 
-        # If new_rank is occupied, adjust other ranks
-        print(f"New rank {new_rank} is occupied. Adjusting other ranks.")
+        # If shifting is needed, determine the range based on the direction
+        if direction == 'down':
+            # Moving down in rank numbers (e.g., from 15 to 60)
+            # Shift members in the range (old_rank, new_rank] up by 1
+            shift_start = old_rank + 1
+            shift_end = new_rank
+            shift_amount = -1  # Decrease rank by 1
+            print(f"Moving down: Shifting ranks {shift_start} to {shift_end} up by 1.")
+        elif direction == 'up':
+            # Moving up in rank numbers (e.g., from 60 to 15)
+            # Shift members in the range [new_rank, old_rank) down by 1
+            shift_start = new_rank
+            shift_end = old_rank - 1
+            shift_amount = 1  # Increase rank by 1
+            print(f"Moving up: Shifting ranks {shift_start} to {shift_end} down by 1.")
+        else:
+            # No specific direction, likely assigning a new rank without old_rank
+            # Shift members at new_rank and above up by 1
+            shift_start = new_rank
+            shift_end = max(self.user_ranks.values())  # Adjust as needed
+            shift_amount = 1
+            print(f"Assigning new rank without direction: Shifting ranks {shift_start} and above down by 1.")
 
+        # Collect members to shift
+        members_to_shift = []
         for member_id_str, rank in self.user_ranks.items():
             member_id = int(member_id_str)
-            if member_id == target_member_id:
-                continue
+            if shift_start <= rank <= shift_end:
+                members_to_shift.append((member_id, rank))
 
+        # Sort members appropriately to avoid conflicts during shifting
+        if shift_amount == -1:
+            # Shift up: process lower ranks first
+            members_to_shift.sort(key=lambda x: x[1])
+        else:
+            # Shift down: process higher ranks first
+            members_to_shift.sort(key=lambda x: x[1], reverse=True)
+
+        for member_id, rank in members_to_shift:
+            new_member_rank = rank + shift_amount
+            self.user_ranks[str(member_id)] = new_member_rank
             try:
                 member = guild.get_member(member_id)
                 if member is None:
                     member = await guild.fetch_member(member_id)
+                await self.update_nickname(member, new_member_rank)
+                print(f"Updated {member.display_name}'s rank to {new_member_rank}")
             except discord.NotFound:
                 print(f"Member with ID {member_id} not found.")
-                continue  # Member not found in guild
+                continue
 
-            print(f"Processing member: {member.display_name}, Current Rank: {rank}")
-
-            if old_rank is not None:
-                if old_rank < new_rank:
-                    # Moving down in rank numbers (e.g., from 5 to 10)
-                    if old_rank < rank <= new_rank:
-                        self.user_ranks[str(member_id)] = rank - 1
-                        await self.update_nickname(member, rank - 1)
-                        print(f"Decreased rank of {member.display_name} to {rank - 1}")
-                else:
-                    # Moving up in rank numbers (e.g., from 10 to 5)
-                    if new_rank <= rank < old_rank:
-                        self.user_ranks[str(member_id)] = rank + 1
-                        await self.update_nickname(member, rank + 1)
-                        print(f"Increased rank of {member.display_name} to {rank + 1}")
-            else:
-                # No old rank
-                if rank >= new_rank:
-                    self.user_ranks[str(member_id)] = rank + 1
-                    await self.update_nickname(member, rank + 1)
-                    print(f"Increased rank of {member.display_name} to {rank + 1}")
+        # Assign the new rank to the target member
+        self.user_ranks[str(target_member_id)] = new_rank
+        try:
+            target_member = guild.get_member(target_member_id)
+            if target_member is None:
+                target_member = await guild.fetch_member(target_member_id)
+            await self.update_nickname(target_member, new_rank)
+            print(f"Assigned rank {new_rank} to {target_member.display_name}")
+        except discord.NotFound:
+            print(f"Target member with ID {target_member_id} not found.")
 
         self.save_ranks_to_file()
         await self.update_rank_message(guild)  # Update the rank list message
         await self.fill_rank_gaps(guild)
+
 
     async def fill_rank_gaps(self, guild):
         """Reassign ranks to fill any gaps."""
