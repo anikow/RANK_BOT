@@ -12,8 +12,11 @@ from typing import Optional, Dict, List
 
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to include timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Intents setup
@@ -22,11 +25,11 @@ intents.members = True
 intents.message_content = False
 
 # Configurable parameters
-AUTHORIZED_ROLE = os.getenv('AUTHORIZED_ROLE', 'Mommy')
-RANK_CHANNEL_NAME = os.getenv('RANK_CHANNEL_NAME', 'rank-list')
+AUTHORIZED_ROLE = os.getenv('AUTHORIZED_ROLE')
+RANK_CHANNEL_NAME = os.getenv('RANK_CHANNEL_NAME')
 
 class RankManager:
-    """Class to manage user ranks."""
+    """Manages user ranks, including loading, saving, parsing, and enforcing ranks."""
 
     def __init__(self):
         self.user_ranks: Dict[str, int] = {}
@@ -35,7 +38,7 @@ class RankManager:
         self.load_ranks_from_file()
 
     def load_ranks_from_file(self):
-        """Synchronously load ranks and message ID from a JSON file."""
+        """Load user ranks and rank message ID from 'ranks.json' file if it exists."""
         if os.path.exists('ranks.json'):
             try:
                 with open('ranks.json', 'r') as f:
@@ -49,7 +52,7 @@ class RankManager:
             logger.info("'ranks.json' not found. Starting with empty ranks.")
 
     def save_ranks_to_file(self):
-        """Synchronously save ranks and message ID to a JSON file."""
+        """Save user ranks and rank message ID to 'ranks.json' file."""
         data = {
             'user_ranks': self.user_ranks,
             'rank_message_id': self.rank_message_id
@@ -63,7 +66,10 @@ class RankManager:
 
     @staticmethod
     def parse_rank(nickname: Optional[str]) -> Optional[int]:
-        """Extract rank from a nickname."""
+        """
+        Extracts the rank number from a nickname if it ends with '#<number>'.
+        Returns the rank as an integer, or None if not found.
+        """
         if nickname:
             match = re.search(r'#\s*(\d+)$', nickname)
             if match:
@@ -73,7 +79,10 @@ class RankManager:
         return None
 
     async def load_ranks_from_nicknames(self, guild: discord.Guild, members: List[discord.Member]):
-        """Load ranks from existing member nicknames."""
+        """
+        Loads ranks from guild members' nicknames and updates the user ranks accordingly.
+        Saves the ranks to the file after loading.
+        """
         logger.info("Loading ranks from nicknames...")
         for member in members:
             nickname = member.nick
@@ -88,7 +97,10 @@ class RankManager:
         self.save_ranks_to_file()
 
     async def enforce_ranks_on_discord(self, guild: discord.Guild, members: List[discord.Member]):
-        """Enforce ranks from user_ranks onto Discord nicknames."""
+        """
+        Updates Discord members' nicknames to match the ranks stored in user_ranks.
+        Ensures that each member's nickname correctly reflects their assigned rank.
+        """
         logger.info("Enforcing ranks on Discord nicknames...")
         for member in members:
             user_id_str = str(member.id)
@@ -96,22 +108,24 @@ class RankManager:
             current_rank_in_nickname = self.parse_rank(member.nick)
 
             if expected_rank is not None:
-                # Member should have a rank
+                # Member is expected to have a rank
                 if current_rank_in_nickname != expected_rank:
                     logger.info(f"Updating rank for member {member.display_name} to {expected_rank}")
                     await self.update_nickname(member, expected_rank)
                 else:
                     logger.debug(f"Member {member.display_name} already has correct rank {expected_rank}")
             else:
-                # Member should not have a rank, remove any rank from nickname
+                # Member should not have a rank; remove any rank from nickname
                 if current_rank_in_nickname is not None:
-                    logger.info(f"Removing rank from member {member.display_name} as they are not in ranks.json")
+                    logger.info(f"Removing rank from member {member.display_name} as they are not in user_ranks")
                     await self.update_nickname(member, None)
                 else:
                     logger.debug(f"Member {member.display_name} has no rank and is correct")
 
     async def update_nickname(self, member: discord.Member, new_rank: Optional[int]):
-        """Update a member's nickname with the new rank or remove it."""
+        """
+        Updates a member's nickname to include the new rank, or removes the rank if new_rank is None.
+        """
         # Extract the base nickname without rank
         if member.nick is not None:
             name_without_rank = re.sub(r'#\s*\d+$', '', member.nick).strip()
@@ -138,12 +152,15 @@ class RankManager:
             logger.warning(f"Permission denied to change nickname for {member.display_name}.")
         except Exception as e:
             logger.exception(f"An error occurred while changing nickname for {member.display_name}")
-
-        # Save only if changes were successful
-        self.save_ranks_to_file()
+        finally:
+            # Save the ranks after attempting to update the nickname
+            self.save_ranks_to_file()
 
     async def adjust_ranks(self, guild: discord.Guild, target_member_id: int, old_rank: Optional[int], new_rank: int):
-        """Adjust ranks of other members based on the new rank assignment."""
+        """
+        Adjusts ranks when a member's rank is changed.
+        Updates user_ranks, reassigns ranks to ensure sequential order, updates nicknames, and updates the rank message.
+        """
         logger.info(f"Adjusting ranks in guild: {guild.name}")
 
         async with self.lock:
@@ -151,7 +168,7 @@ class RankManager:
             if old_rank is not None:
                 self.user_ranks.pop(str(target_member_id), None)
 
-            # Insert the new rank
+            # Assign the new rank to the target member
             self.user_ranks[str(target_member_id)] = new_rank
 
             # Reassign all ranks to ensure they are sequential and start from 1
@@ -168,11 +185,15 @@ class RankManager:
             await self.update_nickname(target_member, new_rank)
             logger.info(f"Assigned rank {new_rank} to {target_member.display_name}")
 
-            await self.update_rank_message(guild)  # Update the rank list message
+            # Update the rank list message in the designated channel
+            await self.update_rank_message(guild)
 
     async def fill_rank_gaps(self, guild: discord.Guild):
-        """Reassign ranks to fill any gaps."""
-        logger.info("Filling rank gaps...")
+        """
+        Reassigns ranks to ensure they are sequential and start from 1, filling any gaps.
+        Updates members' nicknames accordingly and saves the ranks to the file.
+        """
+        logger.info("Filling rank gaps to ensure sequential ranks...")
         # Get all user IDs and their ranks
         rank_items = list(self.user_ranks.items())
         # Sort the items by rank
@@ -200,10 +221,14 @@ class RankManager:
 
         self.user_ranks = new_user_ranks
         self.save_ranks_to_file()
-        await self.update_rank_message(guild)  # Update the rank list message
+
+        # Update the rank list message in the designated channel
+        await self.update_rank_message(guild)
 
     async def update_rank_message(self, guild: discord.Guild):
-        """Create or update the rank list message in a designated channel."""
+        """
+        Creates or updates the rank list message in the specified channel, displaying all users with their ranks.
+        """
         channel_name = RANK_CHANNEL_NAME
         channel = discord.utils.get(guild.text_channels, name=channel_name)
 
@@ -259,7 +284,7 @@ class RankManager:
                 logger.exception("Failed to send rank list message")
 
 class RankCog(commands.Cog):
-    """Cog for managing user ranks."""
+    """Discord Cog that provides commands and listeners for managing user ranks."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -268,6 +293,10 @@ class RankCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        """
+        Called when the bot is ready.
+        Initializes user ranks for each guild and enforces ranks on Discord nicknames.
+        """
         try:
             logger.info(f"{self.bot.user.name} has connected to Discord!")
             for guild in self.bot.guilds:
@@ -298,7 +327,7 @@ class RankCog(commands.Cog):
     @app_commands.describe(member='The member to change rank for', new_rank='The new rank to assign')
     async def rank_set(self, interaction: discord.Interaction, member: discord.Member, new_rank: int):
         """
-        Change a user's rank and adjust other users' ranks accordingly.
+        Changes a user's rank to a new value and adjusts other users' ranks accordingly.
         """
         # Check if the user has Admin permission or authorized role
         if not (
@@ -329,7 +358,7 @@ class RankCog(commands.Cog):
             await interaction.followup.send(f"✅ {member.mention}'s rank has been updated to {new_rank}.")
         except Exception as e:
             # Log the error and send an error message
-            logger.exception("An error occurred in rank set command")
+            logger.exception(f"An error occurred in rank set command for member {member.display_name} with rank {new_rank}")
             if not interaction.is_expired():
                 await interaction.followup.send("🚫 An error occurred while processing the command.", ephemeral=True)
         finally:
@@ -339,7 +368,7 @@ class RankCog(commands.Cog):
 
     @rank_set.error
     async def rank_set_error(self, interaction: discord.Interaction, error):
-        """Handle errors for the rank set command."""
+        """Handles errors for the rank set command."""
         if isinstance(error, app_commands.errors.MissingPermissions):
             if not interaction.response.is_done():
                 await interaction.response.send_message("🚫 You do not have permission to change ranks.", ephemeral=True)
@@ -352,12 +381,12 @@ class RankCog(commands.Cog):
                 await interaction.response.send_message("🚫 An unexpected error occurred.", ephemeral=True)
             logger.exception("Error in rank set command")
 
-    # New 'remove' subcommand
+    # 'remove' subcommand
     @rank.command(name="remove", description="Remove a user's rank and adjust other users' ranks accordingly.")
     @app_commands.describe(member='The member to remove rank from')
     async def rank_remove(self, interaction: discord.Interaction, member: discord.Member):
         """
-        Remove a user's rank and adjust other users' ranks accordingly.
+        Removes a user's rank and adjusts other users' ranks accordingly to fill any gaps.
         """
         # Check if the user has Admin permission or authorized role
         if not (
@@ -390,7 +419,7 @@ class RankCog(commands.Cog):
             await interaction.followup.send(f"✅ {member.mention}'s rank has been removed.")
         except Exception as e:
             # Log the error and send an error message
-            logger.exception("An error occurred in rank remove command")
+            logger.exception(f"An error occurred in rank remove command for member {member.display_name}")
             if not interaction.is_expired():
                 await interaction.followup.send("🚫 An error occurred while processing the command.", ephemeral=True)
         finally:
@@ -400,7 +429,7 @@ class RankCog(commands.Cog):
 
     @rank_remove.error
     async def rank_remove_error(self, interaction: discord.Interaction, error):
-        """Handle errors for the rank remove command."""
+        """Handles errors for the rank remove command."""
         if isinstance(error, app_commands.errors.MissingPermissions):
             if not interaction.response.is_done():
                 await interaction.response.send_message("🚫 You do not have permission to remove ranks.", ephemeral=True)
@@ -415,8 +444,11 @@ class RankCog(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def check_nicknames(self):
-        """Periodically enforce ranks from 'ranks.json' onto Discord."""
-        logger.info("Checking nicknames for discrepancies...")
+        """
+        Periodically checks and enforces ranks on Discord nicknames every 5 minutes.
+        Ensures that all members' nicknames are in sync with their assigned ranks.
+        """
+        logger.info("Periodic check: Enforcing ranks on Discord nicknames...")
         for guild in self.bot.guilds:
             # Use cached members
             members = guild.members
@@ -428,18 +460,27 @@ class RankCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        """Handle new members joining the guild."""
+        """
+        Handles new members joining the guild.
+        Enforces ranks on their nickname in case they should have a rank.
+        """
         logger.info(f"New member joined: {member.display_name}")
-        # For now, we can enforce ranks on this member
+        # Enforce rank on the new member
         await self.rank_manager.enforce_ranks_on_discord(member.guild, [member])
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        """Ensure that rank suffixes are maintained."""
+        """
+        Ensures that rank suffixes are maintained when a member updates their profile.
+        Re-enforces the rank in their nickname if it was removed or altered.
+        """
         if before.nick != after.nick:
+            logger.info(f"Member nickname changed: {before.display_name} -> {after.display_name}")
             await self.rank_manager.enforce_ranks_on_discord(after.guild, [after])
 
 class MyBot(commands.Bot):
+    """Custom Discord bot class with setup hook for adding cogs and syncing commands."""
+
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
 
