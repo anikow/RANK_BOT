@@ -59,7 +59,7 @@ The bot requires permissions to manage nicknames, read and send messages, and ac
 
 ## Contributing
 
-Contributions are welcome. Please fork the repository and submit a pull request with your changes.
+Contributions are welcome.
 
 ## License
 
